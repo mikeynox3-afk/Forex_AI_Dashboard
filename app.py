@@ -1,93 +1,155 @@
 
-import os
-import glob
-import pickle
-import warnings
-from datetime import datetime
-
-import numpy as np
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
-import feedparser
-
-from streamlit_autorefresh import st_autorefresh
+from pathlib import Path
+from datetime import datetime
+import warnings
 
 warnings.filterwarnings("ignore")
 
-# =====================================================
-# 1. PAGE SETTINGS
-# =====================================================
+# Optional packages
+try:
+    from streamlit_autorefresh import st_autorefresh
+    AUTO_REFRESH_AVAILABLE = True
+except Exception:
+    AUTO_REFRESH_AVAILABLE = False
+
+try:
+    import feedparser
+    NEWS_AVAILABLE = True
+except Exception:
+    NEWS_AVAILABLE = False
+
+try:
+    import joblib
+    MODEL_AVAILABLE = True
+except Exception:
+    MODEL_AVAILABLE = False
+
+
+# --------------------------------------------------
+# PAGE SETTINGS
+# --------------------------------------------------
 
 st.set_page_config(
-    page_title="XAUUSD AI HYBRID PRO",
+    page_title="XAUUSD AI Hybrid Research",
     page_icon="📊",
     layout="wide"
 )
 
-st_autorefresh(interval=60000, key="automatic_refresh")
+st.title("📊 XAUUSD AI HYBRID PRO")
+st.caption(
+    "Educational Market Research Dashboard | "
+    "No broker connection | No live order execution"
+)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.join(BASE_DIR, "XAUUSD_HYBRID_PROJECT")
+# --------------------------------------------------
+# AUTO REFRESH
+# --------------------------------------------------
+
+if AUTO_REFRESH_AVAILABLE:
+    st_autorefresh(interval=60000, key="market_refresh")
+
+st.sidebar.header("Dashboard Settings")
+
+refresh_seconds = st.sidebar.selectbox(
+    "Auto refresh",
+    [30, 60, 120, 300],
+    index=1
+)
+
+st.sidebar.info(
+    "ডেটা Provider নতুন তথ্য দিলে Dashboard আপডেট হবে। "
+    "Refresh interval মানেই Real-time data guarantee নয়।"
+)
+
+# --------------------------------------------------
+# CONSTANTS
+# --------------------------------------------------
+
+SYMBOLS = ["XAUUSD=X", "GC=F"]
+
+TIMEFRAMES = {
+    "M5": "5min",
+    "M15": "15min",
+    "M30": "30min",
+    "H1": "1h",
+    "H4": "4h",
+    "D1": "1D"
+}
 
 FEATURES = [
-    "EMA_20", "EMA_50", "EMA_200",
-    "RSI", "MACD", "MACD_Signal",
-    "ATR", "Volatility", "Volume_Ratio",
+    "EMA_20",
+    "EMA_50",
+    "EMA_200",
+    "RSI",
+    "MACD",
+    "MACD_Signal",
+    "ATR",
+    "Volatility",
+    "Volume_Ratio",
     "Estimated_Buy_Pressure",
     "Estimated_Sell_Pressure"
 ]
 
-st.title("🏆 XAUUSD AI HYBRID PRO")
-st.caption(
-    "Multi-Timeframe | ICT | Smart Money | AI | News | Volume Research"
-)
-st.warning(
-    "Educational research and simulation only. "
-    "No broker connection or real order execution."
-)
+# --------------------------------------------------
+# DOWNLOAD MARKET DATA
+# --------------------------------------------------
 
-# =====================================================
-# 2. MARKET DATA
-# =====================================================
+@st.cache_data(ttl=60, show_spinner=False)
+def download_market_data():
 
-@st.cache_data(ttl=60)
-def download_market():
-    symbols = ["XAUUSD=X", "GC=F"]
-
-    for symbol in symbols:
+    for symbol in SYMBOLS:
         try:
-            data = yf.download(
+            df = yf.download(
                 symbol,
                 period="7d",
                 interval="5m",
+                auto_adjust=False,
                 progress=False,
-                auto_adjust=False
+                threads=False
             )
 
-            if data is None or data.empty:
+            if df is None or df.empty:
                 continue
 
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = data.columns.get_level_values(0)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
 
-            data.columns = [str(c).title() for c in data.columns]
+            df.columns = [
+                str(c).strip().title() for c in df.columns
+            ]
 
-            required = ["Open", "High", "Low", "Close"]
+            required = [
+                "Open", "High", "Low", "Close"
+            ]
 
-            if not all(c in data.columns for c in required):
+            if not all(c in df.columns for c in required):
                 continue
 
-            if "Volume" not in data.columns:
-                data["Volume"] = 0
+            if "Volume" not in df.columns:
+                df["Volume"] = 0
 
-            data = data[required + ["Volume"]].copy()
-            data = data.apply(pd.to_numeric, errors="coerce")
-            data = data.dropna(subset=required)
+            df = df[[
+                "Open", "High", "Low", "Close", "Volume"
+            ]].copy()
 
-            if len(data) > 50:
-                return data, symbol
+            df = df.apply(
+                pd.to_numeric, errors="coerce"
+            )
+
+            df = df.dropna(
+                subset=["Open", "High", "Low", "Close"]
+            )
+
+            df = df[~df.index.duplicated(keep="last")]
+            df = df.sort_index()
+
+            if len(df) >= 50:
+                return df, symbol
 
         except Exception:
             continue
@@ -95,9 +157,9 @@ def download_market():
     return pd.DataFrame(), None
 
 
-# =====================================================
-# 3. TECHNICAL INDICATORS
-# =====================================================
+# --------------------------------------------------
+# TECHNICAL INDICATORS
+# --------------------------------------------------
 
 def calculate_indicators(df):
 
@@ -106,765 +168,717 @@ def calculate_indicators(df):
     close = df["Close"]
     high = df["High"]
     low = df["Low"]
-    volume = df["Volume"].fillna(0)
+    volume = df["Volume"]
 
-    df["EMA_20"] = close.ewm(span=20).mean()
-    df["EMA_50"] = close.ewm(span=50).mean()
-    df["EMA_200"] = close.ewm(span=200).mean()
+    df["EMA_20"] = close.ewm(
+        span=20, adjust=False
+    ).mean()
 
+    df["EMA_50"] = close.ewm(
+        span=50, adjust=False
+    ).mean()
+
+    df["EMA_200"] = close.ewm(
+        span=200, adjust=False
+    ).mean()
+
+    # RSI
     delta = close.diff()
 
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
-    rs = gain / loss.replace(0, np.nan)
+    avg_gain = gain.ewm(
+        alpha=1/14, adjust=False
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1/14, adjust=False
+    ).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
     df["RSI"] = 100 - (100 / (1 + rs))
+    df["RSI"] = df["RSI"].fillna(50)
 
-    ema12 = close.ewm(span=12).mean()
-    ema26 = close.ewm(span=26).mean()
+    # MACD
+    ema12 = close.ewm(
+        span=12, adjust=False
+    ).mean()
+
+    ema26 = close.ewm(
+        span=26, adjust=False
+    ).mean()
 
     df["MACD"] = ema12 - ema26
-    df["MACD_Signal"] = df["MACD"].ewm(span=9).mean()
 
+    df["MACD_Signal"] = df["MACD"].ewm(
+        span=9, adjust=False
+    ).mean()
+
+    # ATR
     previous_close = close.shift(1)
 
-    tr = pd.concat([
-        high - low,
-        (high - previous_close).abs(),
-        (low - previous_close).abs()
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [
+            high - low,
+            (high - previous_close).abs(),
+            (low - previous_close).abs()
+        ],
+        axis=1
+    ).max(axis=1)
 
     df["ATR"] = tr.rolling(14).mean()
 
-    df["Volatility"] = close.pct_change().rolling(20).std()
+    # Volatility
+    df["Volatility"] = (
+        close.pct_change().rolling(20).std()
+    )
 
-    avg_volume = volume.rolling(20).mean()
+    # Volume ratio
+    volume_average = volume.rolling(20).mean()
 
     df["Volume_Ratio"] = (
-        volume / avg_volume.replace(0, np.nan)
-    )
+        volume / volume_average.replace(0, np.nan)
+    ).replace([np.inf, -np.inf], np.nan).fillna(1)
 
+    # Estimated pressure: candle-based proxy only
     candle_range = (high - low).replace(0, np.nan)
 
-    body = close - df["Open"]
-
-    df["Estimated_Buy_Pressure"] = (
-        ((body / candle_range) + 1) / 2
+    buy_pressure = (
+        (close - low) / candle_range
     ).clip(0, 1).fillna(0.5)
 
-    df["Estimated_Sell_Pressure"] = (
-        1 - df["Estimated_Buy_Pressure"]
-    )
+    sell_pressure = (
+        (high - close) / candle_range
+    ).clip(0, 1).fillna(0.5)
 
-    df["Upper_Wick"] = (
-        high - df[["Open", "Close"]].max(axis=1)
-    )
+    df["Estimated_Buy_Pressure"] = buy_pressure
+    df["Estimated_Sell_Pressure"] = sell_pressure
 
-    df["Lower_Wick"] = (
-        df[["Open", "Close"]].min(axis=1) - low
-    )
+    # Bollinger Bands
+    middle = close.rolling(20).mean()
+    std = close.rolling(20).std()
+
+    df["BB_Upper"] = middle + (2 * std)
+    df["BB_Lower"] = middle - (2 * std)
+
+    # VWAP approximation
+    typical_price = (high + low + close) / 3
+
+    cumulative_volume = volume.cumsum()
 
     df["VWAP"] = (
-        ((high + low + close) / 3 * volume).cumsum()
-        / volume.replace(0, np.nan).cumsum()
+        (typical_price * volume).cumsum()
+        / cumulative_volume.replace(0, np.nan)
     )
 
-    bb_mid = close.rolling(20).mean()
-    bb_std = close.rolling(20).std()
-
-    df["BB_Upper"] = bb_mid + 2 * bb_std
-    df["BB_Lower"] = bb_mid - 2 * bb_std
-
-    return df.replace([np.inf, -np.inf], np.nan)
+    return df.replace(
+        [np.inf, -np.inf], np.nan
+    )
 
 
-# =====================================================
-# 4. MULTI-TIMEFRAME
-# =====================================================
+# --------------------------------------------------
+# MULTI TIMEFRAME DATA
+# --------------------------------------------------
 
-def resample_market(df, timeframe):
+def resample_timeframe(df, timeframe):
 
     rules = {
-        "M5": "5min",
         "M15": "15min",
         "M30": "30min",
         "H1": "1h",
         "H4": "4h",
-        "D1": "1D",
-        "W1": "1W"
+        "D1": "1D"
     }
 
-    result = df.resample(rules[timeframe]).agg({
+    if timeframe == "M5":
+        return df.copy()
+
+    rule = rules.get(timeframe)
+
+    if rule is None:
+        return pd.DataFrame()
+
+    result = df.resample(rule).agg({
         "Open": "first",
         "High": "max",
         "Low": "min",
         "Close": "last",
         "Volume": "sum"
-    }).dropna()
+    })
 
-    return calculate_indicators(result)
+    return result.dropna(subset=["Open", "Close"])
 
 
-# =====================================================
-# 5. ICT AND MARKET STRUCTURE
-# =====================================================
+# --------------------------------------------------
+# ICT / SMART MONEY HEURISTICS
+# --------------------------------------------------
 
 def ict_analysis(df):
 
-    recent = df.tail(50)
-
-    if len(recent) < 5:
-        return {}
-
-    last = recent.iloc[-1]
-
-    previous = recent.iloc[:-1]
-
-    swing_high = previous["High"].max()
-    swing_low = previous["Low"].min()
-
-    bullish_sweep = (
-        last["Low"] < swing_low
-        and last["Close"] > swing_low
-    )
-
-    bearish_sweep = (
-        last["High"] > swing_high
-        and last["Close"] < swing_high
-    )
-
-    bullish_bos = last["Close"] > swing_high
-    bearish_bos = last["Close"] < swing_low
-
-    bullish_fvg = False
-    bearish_fvg = False
-
-    if len(recent) >= 3:
-        first = recent.iloc[-3]
-
-        bullish_fvg = last["Low"] > first["High"]
-        bearish_fvg = last["High"] < first["Low"]
-
-    equal_high = (
-        recent["High"].tail(10).max()
-        - recent["High"].tail(10).min()
-    ) < max(float(last["ATR"]) * 0.15, 0.01)
-
-    equal_low = (
-        recent["Low"].tail(10).max()
-        - recent["Low"].tail(10).min()
-    ) < max(float(last["ATR"]) * 0.15, 0.01)
-
-    if bullish_bos:
-        structure = "BULLISH BOS"
-    elif bearish_bos:
-        structure = "BEARISH BOS"
-    else:
-        structure = "NO CLEAR BREAK"
-
-    high_zone = recent["High"].tail(30).max()
-    low_zone = recent["Low"].tail(30).min()
-
-    midpoint = (high_zone + low_zone) / 2
-
-    if last["Close"] > midpoint:
-        premium_discount = "PREMIUM"
-    elif last["Close"] < midpoint:
-        premium_discount = "DISCOUNT"
-    else:
-        premium_discount = "EQUILIBRIUM"
-
-    return {
-        "Structure": structure,
-        "Bullish Sweep": bullish_sweep,
-        "Bearish Sweep": bearish_sweep,
-        "Bullish BOS": bullish_bos,
-        "Bearish BOS": bearish_bos,
-        "Bullish FVG": bullish_fvg,
-        "Bearish FVG": bearish_fvg,
-        "Equal High": equal_high,
-        "Equal Low": equal_low,
-        "Premium/Discount": premium_discount,
-        "Swing High": swing_high,
-        "Swing Low": swing_low,
-        "Midpoint": midpoint
+    result = {
+        "Bullish Sweep": False,
+        "Bearish Sweep": False,
+        "Bullish BOS": False,
+        "Bearish BOS": False,
+        "Bullish FVG": False,
+        "Bearish FVG": False,
+        "Equal High": False,
+        "Equal Low": False,
+        "Market Structure": "Unavailable",
+        "Premium/Discount": "Unavailable"
     }
 
-
-# =====================================================
-# 6. SUPPORT AND RESISTANCE
-# =====================================================
-
-def support_resistance(df):
-
-    recent = df.tail(100)
-
-    return {
-        "Resistance": float(recent["High"].max()),
-        "Support": float(recent["Low"].min())
-    }
-
-
-# =====================================================
-# 7. VOLUME ANALYSIS
-# =====================================================
-
-def volume_analysis(df):
+    if df is None or len(df) < 25:
+        return result
 
     last = df.iloc[-1]
+    previous = df.iloc[-2]
 
-    ratio = last["Volume_Ratio"]
+    recent = df.iloc[-21:-1]
 
-    if pd.isna(ratio):
-        state = "UNAVAILABLE"
-    elif ratio >= 2:
-        state = "HIGH VOLUME"
-    elif ratio >= 1.3:
-        state = "ABOVE AVERAGE"
+    prior_high = recent["High"].max()
+    prior_low = recent["Low"].min()
+
+    # Break of structure (heuristic)
+    result["Bullish BOS"] = bool(
+        last["Close"] > prior_high
+    )
+
+    result["Bearish BOS"] = bool(
+        last["Close"] < prior_low
+    )
+
+    # Liquidity sweep (heuristic)
+    result["Bullish Sweep"] = bool(
+        last["Low"] < prior_low
+        and last["Close"] > prior_low
+    )
+
+    result["Bearish Sweep"] = bool(
+        last["High"] > prior_high
+        and last["Close"] < prior_high
+    )
+
+    # Fair Value Gap (heuristic)
+    result["Bullish FVG"] = bool(
+        last["Low"] > df["High"].iloc[-3]
+    )
+
+    result["Bearish FVG"] = bool(
+        last["High"] < df["Low"].iloc[-3]
+    )
+
+    # Equal highs / lows approximation
+    atr = last.get("ATR", np.nan)
+
+    if pd.notna(atr) and atr > 0:
+        tolerance = atr * 0.15
+
+        highs = df["High"].iloc[-10:-1]
+        lows = df["Low"].iloc[-10:-1]
+
+        result["Equal High"] = bool(
+            (highs.max() - highs.min()) <= tolerance
+        )
+
+        result["Equal Low"] = bool(
+            (lows.max() - lows.min()) <= tolerance
+        )
+
+    if result["Bullish BOS"]:
+        result["Market Structure"] = "Bullish BOS"
+    elif result["Bearish BOS"]:
+        result["Market Structure"] = "Bearish BOS"
     else:
-        state = "NORMAL"
+        result["Market Structure"] = "No confirmed break"
 
-    return {
-        "Volume Ratio": ratio,
-        "Volume State": state,
-        "Buy Pressure Estimate": last["Estimated_Buy_Pressure"],
-        "Sell Pressure Estimate": last["Estimated_Sell_Pressure"]
-    }
+    midpoint = (
+        recent["High"].max() + recent["Low"].min()
+    ) / 2
+
+    result["Premium/Discount"] = (
+        "Premium" if last["Close"] > midpoint
+        else "Discount"
+    )
+
+    return result
 
 
-# =====================================================
-# 8. AI MODEL
-# =====================================================
+# --------------------------------------------------
+# AI MODEL LOADING
+# --------------------------------------------------
 
 @st.cache_resource
 def load_ai_model():
 
-    paths = [
-        os.path.join(PROJECT_DIR, "XAUUSD_AI_Model.pkl"),
-        os.path.join(BASE_DIR, "XAUUSD_AI_Model.pkl"),
-        os.path.join(PROJECT_DIR, "forex_ai_model.pkl"),
-        os.path.join(BASE_DIR, "forex_ai_model.pkl")
+    if not MODEL_AVAILABLE:
+        return None, "joblib unavailable"
+
+    candidates = [
+        Path("XAUUSD_HYBRID_PROJECT/XAUUSD_AI_Model.pkl"),
+        Path("XAUUSD_AI_Model.pkl"),
+        Path("forex_ai_model.pkl")
     ]
 
-    for path in paths:
-        if os.path.exists(path):
+    for path in candidates:
+        if path.exists():
             try:
-                with open(path, "rb") as f:
-                    model = pickle.load(f)
-                return model, path
-            except Exception:
-                continue
+                model = joblib.load(path)
+                return model, str(path)
+            except Exception as error:
+                return None, str(error)
 
-    return None, None
+    return None, "No compatible model file found"
 
 
-def model_analysis(df, model):
+def run_ai_model(model, df):
 
-    if model is None:
-        return "MODEL NOT FOUND", None, None
+    if model is None or df is None or df.empty:
+        return "Unavailable", "Model not loaded"
 
     try:
-        row = df[FEATURES].iloc[[-1]].copy()
+        row = df.iloc[[-1]][FEATURES].copy()
 
-        if row.isna().any().any():
-            return "INSUFFICIENT FEATURES", None, None
+        if row.isnull().any().any():
+            return "Unavailable", "Feature data incomplete"
+
+        expected = getattr(
+            model, "n_features_in_", len(FEATURES)
+        )
+
+        if expected != len(FEATURES):
+            return "Unavailable", "Feature count mismatch"
 
         prediction = model.predict(row)[0]
 
-        probabilities = None
+        # This mapping assumes the original training labels:
+        # 0 = bearish and 1 = bullish.
+        if prediction == 1:
+            label = "Bullish classification"
+        elif prediction == 0:
+            label = "Bearish classification"
+        else:
+            label = f"Class: {prediction}"
+
+        score_text = "Classification only; not a probability"
 
         if hasattr(model, "predict_proba"):
             probabilities = model.predict_proba(row)[0]
+            score_text += (
+                f" | Model output: "
+                f"{np.round(probabilities, 3).tolist()}"
+            )
 
-        if probabilities is not None:
-            classes = list(model.classes_)
-            prob_map = dict(zip(classes, probabilities))
+        return label, score_text
 
-            bullish_score = float(prob_map.get(1, 0)) * 100
-            bearish_score = float(prob_map.get(0, 0)) * 100
-        else:
-            bullish_score = None
-            bearish_score = None
-
-        label = "BULLISH" if prediction == 1 else "BEARISH"
-
-        return label, bullish_score, bearish_score
-
-    except Exception as e:
-        return "MODEL FEATURE ERROR", None, None
+    except Exception as error:
+        return "Unavailable", str(error)
 
 
-# =====================================================
-# 9. NEWS ANALYSIS
-# =====================================================
+# --------------------------------------------------
+# NEWS
+# --------------------------------------------------
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900, show_spinner=False)
 def get_news():
 
-    urls = [
-        "https://news.google.com/rss/search?q=gold+XAUUSD&hl=en-US&gl=US&ceid=US:en",
-        "https://news.google.com/rss/search?q=US+dollar+Federal+Reserve&hl=en-US&gl=US&ceid=US:en",
-        "https://news.google.com/rss/search?q=US+inflation+CPI+NFP+FOMC&hl=en-US&gl=US&ceid=US:en"
-    ]
+    if not NEWS_AVAILABLE:
+        return []
 
-    results = {}
+    url = (
+        "https://news.google.com/rss/search?"
+        "q=gold+OR+XAUUSD+market&hl=en-US&gl=US&ceid=US:en"
+    )
 
-    for url in urls:
-        try:
-            feed = feedparser.parse(url)
+    try:
+        feed = feedparser.parse(url)
 
-            for entry in feed.entries[:10]:
+        articles = []
 
-                title = entry.get("title", "News")
-                results[title] = {
-                    "title": title,
-                    "link": entry.get("link", ""),
-                    "published": entry.get("published", "Unknown")
-                }
+        for item in feed.entries[:10]:
+            articles.append({
+                "title": item.get("title", "No title"),
+                "link": item.get("link", "")
+            })
 
-        except Exception:
-            continue
+        return articles
 
-    return list(results.values())[:20]
+    except Exception:
+        return []
 
 
-def analyze_news(news):
+# --------------------------------------------------
+# MARKET DATA
+# --------------------------------------------------
 
-    positive = [
-        "gold rises", "gold gains", "weak dollar",
-        "rate cut", "safe haven", "dollar falls"
-    ]
+with st.spinner("Downloading market data..."):
 
-    negative = [
-        "gold falls", "gold drops", "strong dollar",
-        "rate hike", "higher yields", "dollar rises"
-    ]
+    raw_data, used_symbol = download_market_data()
 
-    score = 0
-
-    for item in news:
-
-        title = item["title"].lower()
-
-        for word in positive:
-            if word in title:
-                score += 1
-
-        for word in negative:
-            if word in title:
-                score -= 1
-
-    if score > 0:
-        sentiment = "POSITIVE"
-    elif score < 0:
-        sentiment = "NEGATIVE"
-    else:
-        sentiment = "NEUTRAL"
-
-    return sentiment, score
-
-
-# =====================================================
-# 10. MAIN DASHBOARD
-# =====================================================
-
-with st.spinner("Loading market data..."):
-
-    market, symbol = download_market()
-
-if market.empty:
+if raw_data.empty:
 
     st.error(
-        "Market data unavailable. Data provider or connection may be unavailable."
+        "Market data পাওয়া যায়নি। Yahoo Finance-এর "
+        "ডেটা সীমাবদ্ধতা বা নেটওয়ার্ক সমস্যার কারণে হতে পারে।"
+    )
+
+    st.info(
+        "কিছুক্ষণ পর Refresh করো। "
+        "এটি কোনো Broker বা Trading account-এর সঙ্গে যুক্ত নয়।"
     )
 
     st.stop()
 
-market = calculate_indicators(market)
 
-latest = market.iloc[-1]
+df = calculate_indicators(raw_data)
 
-price = float(latest["Close"])
+last = df.iloc[-1]
 
-st.caption(f"Data Source: Yahoo Finance | Symbol: {symbol}")
-st.caption(f"Latest available data: {market.index[-1]}")
+# --------------------------------------------------
+# MARKET OVERVIEW
+# --------------------------------------------------
 
-# Main metrics
+st.subheader("Market Overview")
 
-c1, c2, c3, c4, c5 = st.columns(5)
+col1, col2, col3, col4 = st.columns(4)
 
-c1.metric("XAUUSD Price", f"{price:.2f}")
+col1.metric(
+    "Latest Price",
+    f"{last['Close']:.2f}"
+)
 
-c2.metric(
+col2.metric(
     "RSI",
-    f"{latest['RSI']:.2f}" if pd.notna(latest["RSI"]) else "N/A"
+    f"{last['RSI']:.2f}"
 )
 
-c3.metric("EMA 20", f"{latest['EMA_20']:.2f}")
+col3.metric(
+    "EMA 20",
+    f"{last['EMA_20']:.2f}"
+)
 
-c4.metric("EMA 50", f"{latest['EMA_50']:.2f}")
-
-c5.metric(
+col4.metric(
     "ATR",
-    f"{latest['ATR']:.2f}" if pd.notna(latest["ATR"]) else "N/A"
+    f"{last['ATR']:.4f}"
+    if pd.notna(last["ATR"]) else "N/A"
 )
 
-# =====================================================
-# 11. CHART
-# =====================================================
-
-st.subheader("📈 Advanced Market Chart")
-
-timeframe = st.selectbox(
-    "Select Timeframe",
-    ["M5", "M15", "M30", "H1", "H4", "D1", "W1"]
+st.caption(
+    f"Data source: Yahoo Finance ({used_symbol}) | "
+    f"Last candle: {df.index[-1]}"
 )
 
-chart_data = resample_market(market, timeframe)
+# --------------------------------------------------
+# PRICE CHART
+# --------------------------------------------------
 
-fig = go.Figure()
+st.subheader("Gold Price Chart")
 
-fig.add_trace(go.Candlestick(
-    x=chart_data.index,
-    open=chart_data["Open"],
-    high=chart_data["High"],
-    low=chart_data["Low"],
-    close=chart_data["Close"],
-    name="Gold"
-))
+chart = go.Figure()
 
-for column in ["EMA_20", "EMA_50", "EMA_200"]:
+chart.add_trace(
+    go.Candlestick(
+        x=df.index,
+        open=df["Open"],
+        high=df["High"],
+        low=df["Low"],
+        close=df["Close"],
+        name="Gold"
+    )
+)
 
-    fig.add_trace(go.Scatter(
-        x=chart_data.index,
-        y=chart_data[column],
-        name=column
-    ))
+chart.add_trace(
+    go.Scatter(
+        x=df.index,
+        y=df["EMA_20"],
+        name="EMA 20"
+    )
+)
 
-fig.update_layout(
-    height=600,
+chart.add_trace(
+    go.Scatter(
+        x=df.index,
+        y=df["EMA_50"],
+        name="EMA 50"
+    )
+)
+
+chart.update_layout(
+    height=550,
     xaxis_rangeslider_visible=False,
     template="plotly_dark"
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(chart, use_container_width=True)
 
-# =====================================================
-# 12. MULTI-TIMEFRAME
-# =====================================================
+# --------------------------------------------------
+# MULTI TIMEFRAME ANALYSIS
+# --------------------------------------------------
 
-st.subheader("🕒 Multi-Timeframe Dashboard")
+st.subheader("Multi-Timeframe Analysis")
 
-timeframes = ["M5", "M15", "M30", "H1", "H4", "D1", "W1"]
+mtf_rows = []
 
-columns = st.columns(4)
+mtf_frames = {}
 
-for i, tf in enumerate(timeframes):
+for timeframe in TIMEFRAMES:
 
-    data = resample_market(market, tf)
+    frame = resample_timeframe(df, timeframe)
 
-    if not data.empty:
+    if frame.empty:
+        continue
 
-        row = data.iloc[-1]
+    frame = calculate_indicators(frame)
+    mtf_frames[timeframe] = frame
 
-        with columns[i % 4]:
+    current = frame.iloc[-1]
 
-            st.metric(
-                f"{tf} Close",
-                f"{row['Close']:.2f}"
-            )
+    trend = "Neutral"
 
-            if pd.notna(row["RSI"]):
-                st.caption(f"RSI: {row['RSI']:.2f}")
+    if current["Close"] > current["EMA_20"]:
+        trend = "Above EMA 20"
 
+    elif current["Close"] < current["EMA_20"]:
+        trend = "Below EMA 20"
 
-# =====================================================
-# 13. ICT ANALYSIS
-# =====================================================
+    mtf_rows.append({
+        "Timeframe": timeframe,
+        "Close": round(current["Close"], 2),
+        "EMA 20": round(current["EMA_20"], 2),
+        "RSI": round(current["RSI"], 2),
+        "Trend": trend,
+        "Candles": len(frame)
+    })
 
-st.subheader("🧠 ICT / Smart Money Analysis")
-
-ict = ict_analysis(market)
-
-if ict:
-
-    a, b, c = st.columns(3)
-
-    a.metric("Market Structure", ict["Structure"])
-
-    b.metric("Premium / Discount", ict["Premium/Discount"])
-
-    c.metric("Swing High", f"{ict['Swing High']:.2f}")
-
-    a, b, c = st.columns(3)
-
-    a.write(f"Bullish Liquidity Sweep: {ict.get('Bullish Sweep', 'N/A')}")
-    b.write(f"Bearish Liquidity Sweep: {ict.get('Bearish Sweep', 'N/A')}")
-    c.write(f"Bullish BOS: {ict.get('Bullish BOS', 'N/A')}")
-
-    a, b, c = st.columns(3)
-
-    a.write(f"Bearish BOS: {ict.get('Bearish BOS', 'N/A')}")
-    b.write(f"Bullish FVG: {ict.get('Bullish FVG', 'N/A')}")
-    c.write(f"Bearish FVG: {ict.get('Bearish FVG', 'N/A')}")
-
-    a, b = st.columns(2)
-
-    a.write("Equal High:", ict["Equal High"])
-    b.write("Equal Low:", ict["Equal Low"])
-
-    st.caption(
-        "ICT, liquidity and institutional activity labels are simplified "
-        "price-action heuristics. They do not reveal actual institutional orders."
+if mtf_rows:
+    st.dataframe(
+        pd.DataFrame(mtf_rows),
+        use_container_width=True,
+        hide_index=True
     )
 
+st.caption(
+    "M15 থেকে D1 পর্যন্ত ডেটা M5 candles থেকে resample করা। "
+    "তাই এগুলো আলাদা provider-এর independent timeframe data নয়।"
+)
 
-# =====================================================
-# 14. SUPPORT AND RESISTANCE
-# =====================================================
+# --------------------------------------------------
+# ICT ANALYSIS
+# --------------------------------------------------
 
-st.subheader("📍 Support / Resistance")
+st.subheader("ICT / Smart Money Research")
 
-sr = support_resistance(market)
+selected_tf = st.selectbox(
+    "ICT timeframe",
+    list(mtf_frames.keys()),
+    index=0
+)
 
-a, b = st.columns(2)
-
-a.metric("Support Zone", f"{sr['Support']:.2f}")
-b.metric("Resistance Zone", f"{sr['Resistance']:.2f}")
-
-
-# =====================================================
-# 15. VOLUME AND ORDER FLOW PROXY
-# =====================================================
-
-st.subheader("📊 Volume & Order Flow Proxy")
-
-vol = volume_analysis(market)
+ict = ict_analysis(mtf_frames[selected_tf])
 
 a, b, c = st.columns(3)
 
-a.metric(
+a.write(
+    "Bullish Liquidity Sweep:",
+    ict.get("Bullish Sweep", False)
+)
+
+b.write(
+    "Bearish Liquidity Sweep:",
+    ict.get("Bearish Sweep", False)
+)
+
+c.write(
+    "Market Structure:",
+    ict.get("Market Structure", "N/A")
+)
+
+a, b, c = st.columns(3)
+
+a.write(
+    "Bullish BOS:",
+    ict.get("Bullish BOS", False)
+)
+
+b.write(
+    "Bearish BOS:",
+    ict.get("Bearish BOS", False)
+)
+
+c.write(
+    "Premium / Discount:",
+    ict.get("Premium/Discount", "N/A")
+)
+
+a, b, c = st.columns(3)
+
+a.write(
+    "Bullish FVG:",
+    ict.get("Bullish FVG", False)
+)
+
+b.write(
+    "Bearish FVG:",
+    ict.get("Bearish FVG", False)
+)
+
+c.write(
+    "Equal High / Low:",
+    f"{ict.get('Equal High', False)} / "
+    f"{ict.get('Equal Low', False)}"
+)
+
+st.caption(
+    "ICT labels are simplified candle-based heuristics, "
+    "not verified institutional order-flow data."
+)
+
+# --------------------------------------------------
+# VOLUME ANALYSIS
+# --------------------------------------------------
+
+st.subheader("Volume Research")
+
+volume_col1, volume_col2 = st.columns(2)
+
+volume_col1.metric(
     "Volume Ratio",
-    f"{vol['Volume Ratio']:.2f}"
-    if pd.notna(vol["Volume Ratio"]) else "N/A"
+    f"{last['Volume_Ratio']:.2f}"
 )
 
-b.metric("Volume State", vol["Volume State"])
-
-c.metric(
-    "Estimated Buy Pressure",
-    f"{vol['Buy Pressure Estimate'] * 100:.1f}%"
-)
-
-st.write(
-    "Estimated Sell Pressure:",
-    f"{vol['Sell Pressure Estimate'] * 100:.1f}%"
+volume_col2.metric(
+    "Estimated Buy / Sell Pressure",
+    f"{last['Estimated_Buy_Pressure']:.2f} / "
+    f"{last['Estimated_Sell_Pressure']:.2f}"
 )
 
 st.caption(
-    "Yahoo Finance volume is a data-provider volume measure, not verified "
-    "centralized XAUUSD order flow. Buy/sell pressure is only a candle-based estimate."
+    "Estimated pressure is calculated from candle position. "
+    "It is not actual institutional buying or selling."
 )
 
+# --------------------------------------------------
+# AI MODEL
+# --------------------------------------------------
 
-# =====================================================
-# 16. NEWS
-# =====================================================
+st.subheader("AI Model Research")
 
-st.subheader("🌍 Gold / USD News Analysis")
+model, model_status = load_ai_model()
 
-news = get_news()
+st.write("Model status:", model_status)
 
-news_sentiment, news_score = analyze_news(news)
+ai_label, ai_details = run_ai_model(model, df)
 
-a, b = st.columns(2)
-
-a.metric("News Sentiment", news_sentiment)
-b.metric("Keyword Score", news_score)
-
-if news:
-
-    for item in news:
-
-        st.markdown(f"**[{item['title']}]({item['link']})**")
-        st.caption(item["published"])
-
-else:
-
-    st.info("News feed currently unavailable.")
-
-
-# =====================================================
-# 17. AI MODEL
-# =====================================================
-
-st.subheader("🤖 Previous AI Model Analysis")
-
-model, model_path = load_ai_model()
-
-model_label, bullish_score, bearish_score = model_analysis(
-    market,
-    model
+st.metric(
+    "AI Classification",
+    ai_label
 )
 
-if model is not None:
+st.write(ai_details)
 
-    st.success(f"AI Model Loaded: {os.path.basename(model_path)}")
+st.warning(
+    "AI classification is based on the existing model and its "
+    "training labels. It is not a trading signal, prediction "
+    "guarantee, or probability of profit."
+)
+
+# --------------------------------------------------
+# SUPPORT / RESISTANCE
+# --------------------------------------------------
+
+st.subheader("Recent Support & Resistance")
+
+recent_data = df.tail(100)
+
+support = recent_data["Low"].min()
+resistance = recent_data["High"].max()
+
+support_col, resistance_col = st.columns(2)
+
+support_col.metric(
+    "Recent Support Area",
+    f"{support:.2f}"
+)
+
+resistance_col.metric(
+    "Recent Resistance Area",
+    f"{resistance:.2f}"
+)
+
+# --------------------------------------------------
+# NEWS
+# --------------------------------------------------
+
+st.subheader("Gold Market News")
+
+articles = get_news()
+
+if articles:
+
+    for article in articles:
+        title = article.get("title", "News")
+
+        link = article.get("link", "")
+
+        if link:
+            st.markdown(f"- [{title}]({link})")
+        else:
+            st.write(title)
 
 else:
-
-    st.warning(
-        "Previous AI model could not be loaded. Rule-based research remains available."
+    st.info(
+        "News পাওয়া যায়নি। feedparser বা News feed "
+        "সাময়িকভাবে unavailable হতে পারে।"
     )
 
-if bullish_score is not None:
-
-    a, b = st.columns(2)
-
-    a.metric("Model Bullish Score", f"{bullish_score:.1f}%")
-    b.metric("Model Bearish Score", f"{bearish_score:.1f}%")
-
-st.write("Model Classification:", model_label)
-
 st.caption(
-    "Model classification scores are not probabilities of profit or trade success. "
-    "The model is not automatically validated for every timeframe."
+    "News headlines are external content. "
+    "Their market impact is not automatically verified."
 )
 
+# --------------------------------------------------
+# RAW MARKET DATA
+# --------------------------------------------------
 
-# =====================================================
-# 18. RESEARCH CLASSIFICATION
-# =====================================================
+st.subheader("Latest Market Data")
 
-st.subheader("🎯 Combined Research Classification")
-
-bull = 0
-bear = 0
-
-if latest["EMA_20"] > latest["EMA_50"]:
-    bull += 1
-else:
-    bear += 1
-
-if latest["MACD"] > latest["MACD_Signal"]:
-    bull += 1
-else:
-    bear += 1
-
-if pd.notna(latest["RSI"]):
-
-    if latest["RSI"] > 55:
-        bull += 1
-
-    elif latest["RSI"] < 45:
-        bear += 1
-
-if ict.get("Bullish Sweep"):
-    bull += 1
-
-if ict.get("Bearish Sweep"):
-    bear += 1
-
-if ict.get("Bullish BOS"):
-    bull += 1
-
-if ict.get("Bearish BOS"):
-    bear += 1
-
-if news_sentiment == "POSITIVE":
-    bull += 1
-
-elif news_sentiment == "NEGATIVE":
-    bear += 1
-
-if bull > bear:
-    classification = "BULLISH"
-elif bear > bull:
-    classification = "BEARISH"
-else:
-    classification = "NEUTRAL"
-
-a, b, c = st.columns(3)
-
-a.metric("Bullish Evidence", bull)
-b.metric("Bearish Evidence", bear)
-c.metric("Research Result", classification)
-
-if classification == "BULLISH":
-
-    st.success("BUY — SIMULATION / RESEARCH LABEL")
-
-elif classification == "BEARISH":
-
-    st.error("SELL — SIMULATION / RESEARCH LABEL")
-
-else:
-
-    st.warning("HOLD — SIMULATION / RESEARCH LABEL")
-
-
-# =====================================================
-# 19. SIGNAL HISTORY
-# =====================================================
-
-st.subheader("📚 Research Signal History")
-
-if "signal_history" not in st.session_state:
-
-    st.session_state.signal_history = []
-
-signal_record = {
-    "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    "Price": price,
-    "Classification": classification,
-    "Bullish Evidence": bull,
-    "Bearish Evidence": bear
-}
-
-if (
-    not st.session_state.signal_history
-    or st.session_state.signal_history[-1]["Classification"] != classification
-    or st.session_state.signal_history[-1]["Price"] != price
-):
-
-    st.session_state.signal_history.append(signal_record)
+display_columns = [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "EMA_20",
+    "EMA_50",
+    "RSI",
+    "MACD",
+    "ATR"
+]
 
 st.dataframe(
-    pd.DataFrame(st.session_state.signal_history[::-1]),
+    df[display_columns].tail(50).sort_index(
+        ascending=False
+    ),
     use_container_width=True
 )
 
-# =====================================================
-# 20. HISTORICAL DATA
-# =====================================================
+# --------------------------------------------------
+# FOOTER
+# --------------------------------------------------
 
-st.subheader("📁 Historical Market Data")
+st.divider()
 
-with st.expander("View Market Data"):
-
-    st.dataframe(
-        market.tail(200),
-        use_container_width=True
-    )
-
-# =====================================================
-# 21. SYSTEM STATUS
-# =====================================================
-
-st.subheader("⚙️ System Status")
-
-st.write("Automatic refresh: Every 60 seconds")
-st.write("Market data: Latest available provider data")
-st.write("AI model: Previous model file, if compatible")
-st.write("News: RSS feeds, when available")
-st.write("Real order execution: Disabled")
-
-st.write(
-    "Dashboard update:",
-    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+st.caption(
+    "XAUUSD AI HYBRID PRO | Educational Research Only"
 )
 
 st.caption(
-    "XAUUSD AI HYBRID PRO | Historical and latest available data research | "
-    "Educational simulation only | No financial advice"
+    "No broker API, no deposits, no live order execution. "
+    "Market data may be delayed, incomplete, or unavailable."
+)
+
+st.caption(
+    f"Dashboard generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 )
