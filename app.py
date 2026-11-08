@@ -605,7 +605,7 @@ if ict:
     a, b, c = st.columns(3)
 
     a.write(f"Bearish BOS: {ict.get('Bearish BOS', 'N/A')}")
-    b.write("Bullish FVG:", ict["Bullish FVG"])
+    b.write(f"Bullish FVG: {ict.get('Bullish FVG', 'N/A')}")
     c.write("Bearish FVG:", ict["Bearish FVG"])
 
     a, b = st.columns(2)
