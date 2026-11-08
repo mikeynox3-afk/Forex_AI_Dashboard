@@ -598,7 +598,7 @@ if ict:
 
     a, b, c = st.columns(3)
 
-    a.write("Bullish Liquidity Sweep:", ict["Bullish Sweep"])
+    a.write(f"Bullish Liquidity Sweep: {ict.get('Bullish Sweep', 'N/A')}")
     b.write("Bearish Liquidity Sweep:", ict["Bearish Sweep"])
     c.write("Bullish BOS:", ict["Bullish BOS"])
 
