@@ -6,3 +6,5 @@ yfinance
 plotly
 feedparser
 streamlit-autorefresh
+scikit-learn==1.6.1
+joblib
