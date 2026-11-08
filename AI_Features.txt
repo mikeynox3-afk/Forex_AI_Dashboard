@@ -1,0 +1,11 @@
+EMA_20
+EMA_50
+EMA_200
+RSI
+MACD
+MACD_Signal
+ATR
+Volatility
+Volume_Ratio
+Estimated_Buy_Pressure
+Estimated_Sell_Pressure
