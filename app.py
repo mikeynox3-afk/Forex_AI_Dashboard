@@ -1,243 +1,298 @@
-import os
-import zipfile
-import glob
-import joblib
-import pandas as pd
+
 import streamlit as st
+import pandas as pd
+import numpy as np
+import yfinance as yf
 import plotly.graph_objects as go
+import feedparser
+from streamlit_autorefresh import st_autorefresh
+from datetime import datetime, timezone
 
 st.set_page_config(
-    page_title="XAUUSD AI Hybrid Dashboard",
+    page_title="XAUUSD AI Research Dashboard",
     page_icon="📊",
     layout="wide"
 )
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+st.title("XAUUSD AI HYBRID RESEARCH DASHBOARD")
+st.caption("Educational market research and simulation only. No real trades.")
 
-archive = os.path.join(BASE, "XAUUSD_ALL_FILES_COMPLETE.zip")
-if os.path.exists(archive):
-    with zipfile.ZipFile(archive, "r") as z:
-        for name in z.namelist():
-            if name.startswith("XAUUSD_HYBRID_PROJECT/"):
-                z.extract(name, BASE)
+st_autorefresh(interval=60000, key="market_refresh")
 
-DATA_DIR = os.path.join(BASE, "XAUUSD_HYBRID_PROJECT")
+@st.cache_data(ttl=60)
+def get_market_data():
+    for symbol in ["XAUUSD=X", "GC=F"]:
+        try:
+            df = yf.download(
+                symbol,
+                period="5d",
+                interval="5m",
+                progress=False
+            )
+            if df is not None and not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                df = df.rename(columns=str.title)
+                required = ["Open", "High", "Low", "Close", "Volume"]
+                if all(c in df.columns for c in required):
+                    return df[required].dropna(), symbol
+        except Exception:
+            pass
+    return pd.DataFrame(), None
 
-st.title("XAUUSD AI HYBRID BOT")
-st.caption("Multi-Timeframe Historical Market Research Dashboard")
+def add_indicators(df):
+    df = df.copy()
+    df["EMA20"] = df["Close"].ewm(span=20).mean()
+    df["EMA50"] = df["Close"].ewm(span=50).mean()
+    df["EMA200"] = df["Close"].ewm(span=200).mean()
 
-st.info(
-    "শিক্ষামূলক বিশ্লেষণ ও সিমুলেশন। "
-    "এটি স্বয়ংক্রিয়ভাবে কোনো আসল ট্রেড করে না।"
-)
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    df["RSI"] = 100 - (100 / (1 + rs))
 
-@st.cache_data
-def load_csv(path):
-    return pd.read_csv(path)
+    fast = df["Close"].ewm(span=12).mean()
+    slow = df["Close"].ewm(span=26).mean()
+    df["MACD"] = fast - slow
+    df["MACD_Signal"] = df["MACD"].ewm(span=9).mean()
 
-@st.cache_resource
-def load_model(path):
-    return joblib.load(path)
+    df["ATR"] = (
+        df["High"].combine(df["Close"].shift(), max)
+        - df["Low"].combine(df["Close"].shift(), min)
+    ).rolling(14).mean()
 
-# সব timeframe-এর CSV খোঁজা
-csv_files = glob.glob(
-    os.path.join(DATA_DIR, "XAUUSD_*_Analysis.csv")
-)
+    return df
 
-market_data = {}
+def resample_data(df, timeframe):
+    rule = {
+        "M5": "5min",
+        "M15": "15min",
+        "H1": "1h",
+        "H4": "4h"
+    }[timeframe]
 
-for path in csv_files:
-    filename = os.path.basename(path)
-    timeframe = filename.replace(
-        "XAUUSD_", ""
-    ).replace("_Analysis.csv", "")
+    result = df.resample(rule).agg({
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+        "Volume": "sum"
+    }).dropna()
 
-    market_data[timeframe] = load_csv(path)
+    return add_indicators(result)
 
-if not market_data:
-    st.error("XAUUSD Analysis CSV পাওয়া যায়নি।")
+@st.cache_data(ttl=300)
+def get_news():
+    feeds = [
+        "https://news.google.com/rss/search?q=gold+XAUUSD+OR+Federal+Reserve+OR+US+dollar&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=US+inflation+OR+NFP+OR+Federal+Reserve&hl=en-US&gl=US&ceid=US:en"
+    ]
+
+    items = []
+    for url in feeds:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:10]:
+                items.append({
+                    "title": entry.get("title", "Untitled"),
+                    "link": entry.get("link", ""),
+                    "published": entry.get("published", "Time unavailable")
+                })
+        except Exception:
+            pass
+
+    unique = {}
+    for item in items:
+        unique[item["title"]] = item
+    return list(unique.values())[:15]
+
+def news_sentiment(news):
+    positive_words = [
+        "gold rises", "gold gains", "weak dollar",
+        "rate cut", "safe haven", "eases"
+    ]
+    negative_words = [
+        "gold falls", "gold drops", "strong dollar",
+        "rate hike", "higher yields", "inflation rises"
+    ]
+
+    score = 0
+    for item in news:
+        title = item["title"].lower()
+        score += sum(word in title for word in positive_words)
+        score -= sum(word in title for word in negative_words)
+
+    if score > 0:
+        return "POSITIVE", score
+    if score < 0:
+        return "NEGATIVE", score
+    return "NEUTRAL", score
+
+df, symbol = get_market_data()
+
+if df.empty:
+    st.error("Market data পাওয়া যাচ্ছে না। কিছুক্ষণ পর আবার চেষ্টা করুন।")
+    st.info("Yahoo Finance data availability ও internet connection-এর ওপর এই dashboard নির্ভরশীল।")
     st.stop()
 
-# Dashboard
-st.subheader("Multi-Timeframe Dashboard")
-
-preferred = ["M5", "M15", "H1", "H4", "D1"]
-available = [tf for tf in preferred if tf in market_data]
-
-columns = st.columns(len(available))
-
-for col, tf in zip(columns, available):
-    df = market_data[tf]
-    last = df.iloc[-1]
-
-    close = last.get("close", last.get("Close", 0))
-    rsi = last.get("RSI", 0)
-
-    with col:
-        st.metric(tf + " Close", f"{close:.2f}")
-        st.caption(f"RSI: {rsi:.2f}")
-
-# Timeframe selection
-st.subheader("Market Chart")
-
-selected_tf = st.selectbox(
-    "Select Timeframe",
-    available
-)
-
-df = market_data[selected_tf].copy()
-
-if all(c in df.columns for c in ["open", "high", "low", "close"]):
-
-    x_values = (
-        df["timestamp"]
-        if "timestamp" in df.columns
-        else df.index
-    )
-
-    fig = go.Figure(data=[
-        go.Candlestick(
-            x=x_values,
-            open=df["open"],
-            high=df["high"],
-            low=df["low"],
-            close=df["close"],
-            name=selected_tf
-        )
-    ])
-
-    fig.update_layout(
-        height=500,
-        xaxis_rangeslider_visible=False,
-        title=f"XAUUSD {selected_tf}"
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-else:
-    st.warning("এই CSV-তে OHLC কলাম পাওয়া যায়নি।")
-
-# Technical indicators
-st.subheader("Technical Indicators")
+df = add_indicators(df)
 
 latest = df.iloc[-1]
+price = float(latest["Close"])
 
-metric_names = ["EMA_20", "EMA_50", "EMA_200", "RSI", "MACD", "ATR"]
+st.caption(f"Data source: Yahoo Finance | Symbol: {symbol}")
+st.caption(f"Last data timestamp: {df.index[-1]}")
 
-metric_cols = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Latest Price", f"{price:.2f}")
+c2.metric("RSI", f"{latest['RSI']:.2f}" if pd.notna(latest["RSI"]) else "N/A")
+c3.metric("EMA 20", f"{latest['EMA20']:.2f}")
+c4.metric("EMA 50", f"{latest['EMA50']:.2f}")
 
-for i, name in enumerate(metric_names):
-    value = latest.get(name)
+st.subheader("Market Chart")
 
-    with metric_cols[i % 3]:
-        if value is not None and pd.notna(value):
-            st.metric(name, f"{float(value):.4f}")
-        else:
-            st.metric(name, "N/A")
-
-# AI Model
-st.subheader("AI Model Analysis")
-
-model_candidates = [
-    os.path.join(DATA_DIR, "XAUUSD_AI_Model.pkl"),
-    os.path.join(DATA_DIR, "forex_ai_model.pkl")
-]
-
-model_path = next(
-    (p for p in model_candidates if os.path.exists(p)),
-    None
+fig = go.Figure()
+fig.add_trace(go.Candlestick(
+    x=df.index,
+    open=df["Open"],
+    high=df["High"],
+    low=df["Low"],
+    close=df["Close"],
+    name="Gold"
+))
+fig.add_trace(go.Scatter(
+    x=df.index, y=df["EMA20"],
+    name="EMA 20"
+))
+fig.add_trace(go.Scatter(
+    x=df.index, y=df["EMA50"],
+    name="EMA 50"
+))
+fig.update_layout(
+    height=520,
+    xaxis_rangeslider_visible=False
 )
+st.plotly_chart(fig, use_container_width=True)
 
-features_path = os.path.join(DATA_DIR, "AI_Features.txt")
+st.subheader("Multi-Timeframe Analysis")
 
-if model_path and os.path.exists(features_path):
+timeframes = ["M5", "M15", "H1", "H4"]
+cols = st.columns(4)
 
-    try:
-        model = load_model(model_path)
+for col, tf in zip(cols, timeframes):
+    tf_df = resample_data(df, tf)
+    if not tf_df.empty:
+        row = tf_df.iloc[-1]
+        col.metric(
+            tf + " Close",
+            f"{row['Close']:.2f}"
+        )
+        col.caption(
+            f"RSI: {row['RSI']:.1f}"
+            if pd.notna(row["RSI"]) else "RSI: N/A"
+        )
 
-        with open(features_path, "r") as f:
-            features = [line.strip() for line in f if line.strip()]
+st.subheader("ICT-Inspired Market Structure")
 
-        missing_features = [
-            name for name in features if name not in df.columns
-        ]
+recent = df.tail(30)
+swing_high = recent["High"].iloc[:-1].max()
+swing_low = recent["Low"].iloc[:-1].min()
 
-        if missing_features:
-            st.warning(
-                "AI বিশ্লেষণের জন্য কিছু Feature নেই: "
-                + ", ".join(missing_features)
-            )
-        else:
-            X = df[features].tail(1)
-
-            probabilities = model.predict_proba(X)[0]
-            classes = list(model.classes_)
-
-            if 1 in classes and 0 in classes:
-                bullish = float(probabilities[classes.index(1)])
-                bearish = float(probabilities[classes.index(0)])
-
-                a, b = st.columns(2)
-                a.metric("Model bullish score", f"{bullish:.1%}")
-                b.metric("Model bearish score", f"{bearish:.1%}")
-
-                if bullish >= 0.60:
-                    st.success("Model classification: BULLISH")
-                elif bearish >= 0.60:
-                    st.warning("Model classification: BEARISH")
-                else:
-                    st.info("Model classification: NO CLEAR SETUP")
-
-                st.caption(
-                    "এগুলো মডেলের শ্রেণিবিভাগের স্কোর; "
-                    "লাভ বা সফল ট্রেডের সম্ভাবনা নয়।"
-                )
-
-            else:
-                st.warning("Model-এর class format প্রত্যাশিত নয়।")
-
-    except Exception as e:
-        st.error(f"AI Model load/prediction error: {e}")
-
+if price > swing_high:
+    structure = "Possible Bullish Break"
+elif price < swing_low:
+    structure = "Possible Bearish Break"
 else:
-    st.warning("AI Model অথবা AI_Features.txt পাওয়া যায়নি।")
+    structure = "No Clear Break"
 
-# Market structure and psychology
-st.subheader("Market Structure & Psychology")
+fvg_bull = False
+fvg_bear = False
 
-for name in [
-    "Market_Structure",
-    "Order_Flow_State",
-    "Psychology_State"
-]:
-    if name in df.columns:
-        st.write(f"**{name}:** {latest[name]}")
+if len(df) >= 3:
+    a = df.iloc[-3]
+    c = df.iloc[-1]
+    fvg_bull = c["Low"] > a["High"]
+    fvg_bear = c["High"] < a["Low"]
 
-# Dashboard CSV
-dashboard_path = os.path.join(DATA_DIR, "XAUUSD_Dashboard.csv")
+st.write("Market Structure:", structure)
+st.write("Possible Bullish FVG:", "Yes" if fvg_bull else "No")
+st.write("Possible Bearish FVG:", "Yes" if fvg_bear else "No")
+st.caption("ICT labels are simplified candle-based heuristics, not confirmed institutional order flow.")
 
-if os.path.exists(dashboard_path):
-    st.subheader("Full Analysis Dashboard")
-    st.dataframe(
-        load_csv(dashboard_path),
-        use_container_width=True
-    )
+st.subheader("Gold & USD News Analysis")
 
-# Backtest
-backtest_path = os.path.join(DATA_DIR, "XAUUSD_Backtest.csv")
+news = get_news()
+sentiment, news_score = news_sentiment(news)
 
-if os.path.exists(backtest_path):
-    st.subheader("Historical Backtest Report")
-    st.dataframe(
-        load_csv(backtest_path).tail(50),
-        use_container_width=True
-    )
+st.write("Headline Sentiment:", sentiment)
+st.caption("Automated keyword sentiment is approximate, not a verified market-impact assessment.")
 
-# Raw data
-with st.expander("View Historical Data"):
-    st.dataframe(df.tail(100), use_container_width=True)
+if news:
+    for item in news:
+        st.markdown(f"- [{item['title']}]({item['link']})")
+        st.caption(item["published"])
+else:
+    st.warning("News feed পাওয়া যায়নি।")
+
+st.subheader("AI Research Classification")
+
+bull = 0
+bear = 0
+
+if latest["EMA20"] > latest["EMA50"]:
+    bull += 1
+else:
+    bear += 1
+
+if latest["MACD"] > latest["MACD_Signal"]:
+    bull += 1
+else:
+    bear += 1
+
+if pd.notna(latest["RSI"]):
+    if latest["RSI"] > 55:
+        bull += 1
+    elif latest["RSI"] < 45:
+        bear += 1
+
+if structure == "Possible Bullish Break":
+    bull += 1
+elif structure == "Possible Bearish Break":
+    bear += 1
+
+if sentiment == "POSITIVE":
+    bull += 1
+elif sentiment == "NEGATIVE":
+    bear += 1
+
+if bull > bear:
+    classification = "BULLISH"
+elif bear > bull:
+    classification = "BEARISH"
+else:
+    classification = "NEUTRAL"
+
+st.metric("Research Classification", classification)
+st.write(f"Bullish evidence points: {bull}")
+st.write(f"Bearish evidence points: {bear}")
+
+if classification == "BULLISH":
+    st.success("BUY — Educational simulation label only")
+elif classification == "BEARISH":
+    st.error("SELL — Educational simulation label only")
+else:
+    st.warning("HOLD — Educational simulation label only")
 
 st.caption(
-    "XAUUSD Research Simulator | Historical data only | "
-    "No live order execution | Not financial advice"
+    "This is a rule-based research classification, not a validated predictive AI model, "
+    "not a trade recommendation, and not a probability of profit."
 )
+
+st.subheader("System Status")
+st.write("Automatic refresh: Every 60 seconds")
+st.write("Data mode: Latest available Yahoo Finance data")
+st.write("Real order execution: Disabled")
+st.write("Last dashboard update:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+st.caption("XAUUSD AI HYBRID RESEARCH | Educational simulation only")
