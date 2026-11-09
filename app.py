@@ -708,9 +708,7 @@ else:
     c.write(
         f"Premium / Discount: "
         f"{ict.get('Premium/Discount', 'N/A')}"
-    )
-
-    a, b, c = st.columns(3)
+    )    a, b, c = st.columns(3)
 
     a.write(f"Bullish FVG: {ict.get('Bullish FVG', False)}")
     b.write(f"Bearish FVG: {ict.get('Bearish FVG', False)}")
@@ -724,31 +722,6 @@ else:
 st.caption(
     "ICT labels are simplified candle-based heuristics, "
     "not verified institutional order-flow data."
-)
-
-
-a, b, c = st.columns(3)
-
-a.write(
-    "Bullish BOS:",
-    ict.get("Bullish BOS", False)
-)
-
-b.write(
-    "Bearish BOS:",
-    ict.get("Bearish BOS", False)
-)
-
-c.write(
-    "Premium / Discount:",
-    ict.get("Premium/Discount", "N/A")
-)
-
-a, b, c = st.columns(3)
-
-a.write(
-    "Bullish FVG:",
-    ict.get("Bullish FVG", False)
 )
 
 b.write(
