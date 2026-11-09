@@ -1,19 +1,22 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import yfinance as yf
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import feedparser
 import os
-import joblib
 import warnings
+from datetime import datetime
+
+import feedparser
+import joblib
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+import yfinance as yf
 
 warnings.filterwarnings("ignore")
 
-# =====================================================
-# XAUUSD AI HYBRID PRO - EDUCATIONAL RESEARCH DASHBOARD
-# =====================================================
+# =========================================================
+# XAUUSD AI HYBRID PRO
+# Educational market research dashboard
+# No broker connection / No live trade execution
+# =========================================================
 
 st.set_page_config(
     page_title="XAUUSD AI HYBRID PRO",
@@ -24,107 +27,233 @@ st.set_page_config(
 st.title("🟡 XAUUSD AI HYBRID PRO")
 st.caption("AI-assisted market research dashboard | Educational use only")
 
-# ---------------- SIDEBAR ----------------
+# ---------------- SETTINGS ----------------
 
 st.sidebar.header("⚙️ Dashboard Settings")
 
-period = st.sidebar.selectbox(
-    "Historical Data",
-    ["5d", "1mo", "3mo", "6mo", "1y", "2y"],
-    index=2
-)
-
-interval = st.sidebar.selectbox(
-    "Chart Interval",
-    ["5m", "15m", "30m", "1h", "4h", "1d"],
+timeframe = st.sidebar.selectbox(
+    "Select Timeframe",
+    ["M5", "M15", "M30", "H1", "H4", "D1"],
     index=1
 )
 
-refresh = st.sidebar.button("🔄 Refresh Data")
-
-st.sidebar.info(
-    "এই অ্যাপটি শুধুমাত্র শিক্ষামূলক গবেষণা ও "
-    "ঐতিহাসিক ডেটা বিশ্লেষণের জন্য।"
+period = st.sidebar.selectbox(
+    "Historical Period",
+    ["5d", "1mo", "3mo", "6mo", "1y"],
+    index=2
 )
 
-# ---------------- DATA DOWNLOAD ----------------
+st.sidebar.caption(
+    "Yahoo Finance-এর ডেটা সীমাবদ্ধতার কারণে "
+    "কিছু timeframe-এ সর্বোচ্চ historical period কম হতে পারে।"
+)
 
-@st.cache_data(ttl=60)
-def download_data(period, interval):
+# ---------------- DATA NORMALIZATION ----------------
 
-    symbols = ["XAUUSD=X", "GC=F"]
+def normalize_columns(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
 
-    for symbol in symbols:
+    df = df.copy()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df.columns = [
+        str(c).strip().lower().replace(" ", "_")
+        for c in df.columns
+    ]
+
+    aliases = {
+        "adj_close": "close",
+        "datetime": "date",
+        "timestamp": "date",
+        "time": "date",
+    }
+
+    df = df.rename(columns=aliases)
+
+    required = ["open", "high", "low", "close"]
+
+    if not all(c in df.columns for c in required):
+        return pd.DataFrame()
+
+    if "volume" not in df.columns:
+        df["volume"] = 0
+
+    for col in required + ["volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "date" in df.columns:
+        dates = pd.to_datetime(df["date"], errors="coerce", utc=True)
+        df = df.drop(columns=["date"])
+        df.index = dates
+
+    elif not isinstance(df.index, pd.DatetimeIndex):
         try:
-            data = yf.download(
-                symbol,
-                period=period,
-                interval=interval,
-                progress=False,
-                auto_adjust=True
+            df.index = pd.to_datetime(df.index, errors="coerce", utc=True)
+        except Exception:
+            return pd.DataFrame()
+
+    elif df.index.tz is None:
+        df.index = df.index.tz_localize("UTC")
+    else:
+        df.index = df.index.tz_convert("UTC")
+
+    df = df[~df.index.isna()]
+    df = df.dropna(subset=required)
+    df = df[~df.index.duplicated(keep="last")]
+    df = df.sort_index()
+
+    return df
+
+
+# ---------------- YAHOO FINANCE DATA ----------------
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_market_data(selected_period, selected_timeframe):
+
+    interval_map = {
+        "M5": "5m",
+        "M15": "15m",
+        "M30": "30m",
+        "H1": "1h",
+        "H4": "1h",
+        "D1": "1d",
+    }
+
+    download_interval = interval_map[selected_timeframe]
+
+    # Yahoo intraday data has period limitations.
+    allowed_periods = {
+        "5m": ["5d", "1mo"],
+        "15m": ["5d", "1mo", "3mo"],
+        "30m": ["5d", "1mo", "3mo", "6mo"],
+        "1h": ["5d", "1mo", "3mo", "6mo", "1y"],
+        "1d": ["5d", "1mo", "3mo", "6mo", "1y"],
+    }
+
+    if selected_period not in allowed_periods[download_interval]:
+        selected_period = allowed_periods[download_interval][-1]
+
+    errors = []
+
+    for ticker in ["XAUUSD=X", "GC=F"]:
+        try:
+            raw = yf.Ticker(ticker).history(
+                period=selected_period,
+                interval=download_interval,
+                auto_adjust=True,
+                timeout=20
             )
 
-            if data is not None and not data.empty:
-                if isinstance(data.columns, pd.MultiIndex):
-                    data.columns = data.columns.get_level_values(0)
+            clean = normalize_columns(raw)
 
-                data = data.copy()
-                data.columns = [
-                    str(col).lower().replace(" ", "_")
-                    for col in data.columns
-                ]
+            if not clean.empty and len(clean) >= 2:
+                return clean, ticker, errors
 
-                required = ["open", "high", "low", "close"]
+            errors.append(f"{ticker}: No usable data returned.")
 
-                if all(col in data.columns for col in required):
-                    if "volume" not in data.columns:
-                        data["volume"] = 0
+        except Exception as exc:
+            errors.append(f"{ticker}: {str(exc)[:250]}")
 
-                    return data.dropna(subset=required), symbol
-
-        except Exception:
-            continue
-
-    return pd.DataFrame(), None
+    return pd.DataFrame(), None, errors
 
 
-with st.spinner("Market data loading..."):
-    data, selected_symbol = download_data(period, interval)
+# ---------------- CSV FALLBACK ----------------
 
-if refresh:
-    st.cache_data.clear()
-    st.rerun()
+st.sidebar.divider()
+st.sidebar.subheader("📂 Alternative Data Source")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload your OHLC CSV file",
+    type=["csv"]
+)
+
+csv_data = pd.DataFrame()
+
+if uploaded_file is not None:
+    try:
+        uploaded_file.seek(0)
+        raw_csv = pd.read_csv(uploaded_file)
+        csv_data = normalize_columns(raw_csv)
+
+        if csv_data.empty:
+            st.sidebar.error(
+                "CSV-তে Open, High, Low, Close কলাম পাওয়া যায়নি।"
+            )
+        else:
+            st.sidebar.success(
+                f"CSV loaded: {len(csv_data)} rows"
+            )
+
+    except Exception as exc:
+        st.sidebar.error(f"CSV error: {str(exc)[:200]}")
+
+
+# ---------------- LOAD DATA ----------------
+
+with st.spinner("Loading market data..."):
+
+    if not csv_data.empty:
+        data = csv_data
+        data_source = "Uploaded CSV"
+        data_errors = []
+
+    else:
+        data, data_source, data_errors = get_market_data(
+            period,
+            timeframe
+        )
 
 if data.empty:
-    st.error("ডেটা পাওয়া যায়নি। কিছুক্ষণ পর Refresh Data চাপুন।")
+
+    st.error("Market data could not be loaded.")
+
+    st.warning(
+        "Yahoo Finance থেকে ডেটা পাওয়া যায়নি। "
+        "কিছুক্ষণ পরে আবার চেষ্টা করো অথবা OHLC CSV আপলোড করো।"
+    )
+
+    if data_errors:
+        with st.expander("Technical error details"):
+            for error in data_errors:
+                st.write(error)
+
+    st.info(
+        "CSV ফাইলে Date, Open, High, Low, Close এবং "
+        "ঐচ্ছিক Volume কলাম রাখো।"
+    )
+
     st.stop()
 
-st.success(f"Data loaded: {selected_symbol}")
+st.success(f"Data source: {data_source}")
+
+# ---------------- TIMEFRAME RESAMPLING ----------------
+
+def resample_ohlc(df, rule):
+
+    result = df.resample(rule).agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum"
+    })
+
+    return result.dropna(subset=["open", "high", "low", "close"])
+
+
+if data_source != "Uploaded CSV" and timeframe == "H4":
+    data = resample_ohlc(data, "4h")
+
+if data.empty:
+    st.error("Selected timeframe contains insufficient data.")
+    st.stop()
 
 # ---------------- INDICATORS ----------------
 
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.ewm(
-        alpha=1 / period,
-        min_periods=period,
-        adjust=False
-    ).mean()
-
-    avg_loss = loss.ewm(
-        alpha=1 / period,
-        min_periods=period,
-        adjust=False
-    ).mean()
-
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
-
-
-def add_indicators(df):
+def calculate_indicators(df):
 
     df = df.copy()
 
@@ -133,24 +262,56 @@ def add_indicators(df):
     low = df["low"]
     volume = df["volume"]
 
-    df["EMA_20"] = close.ewm(span=20, adjust=False).mean()
-    df["EMA_50"] = close.ewm(span=50, adjust=False).mean()
-    df["EMA_200"] = close.ewm(span=200, adjust=False).mean()
+    df["EMA_20"] = close.ewm(
+        span=20, adjust=False
+    ).mean()
 
-    df["RSI"] = calculate_rsi(close)
+    df["EMA_50"] = close.ewm(
+        span=50, adjust=False
+    ).mean()
 
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
+    df["EMA_200"] = close.ewm(
+        span=200, adjust=False
+    ).mean()
+
+    delta = close.diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(
+        alpha=1 / 14,
+        min_periods=14,
+        adjust=False
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1 / 14,
+        min_periods=14,
+        adjust=False
+    ).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    df["RSI"] = 100 - (100 / (1 + rs))
+
+    ema12 = close.ewm(
+        span=12, adjust=False
+    ).mean()
+
+    ema26 = close.ewm(
+        span=26, adjust=False
+    ).mean()
 
     df["MACD"] = ema12 - ema26
+
     df["MACD_Signal"] = df["MACD"].ewm(
-        span=9,
-        adjust=False
+        span=9, adjust=False
     ).mean()
 
     previous_close = close.shift(1)
 
-    tr = pd.concat(
+    true_range = pd.concat(
         [
             high - low,
             (high - previous_close).abs(),
@@ -159,13 +320,14 @@ def add_indicators(df):
         axis=1
     ).max(axis=1)
 
-    df["ATR"] = tr.rolling(14).mean()
+    df["ATR"] = true_range.rolling(14).mean()
 
     df["Volatility"] = close.pct_change().rolling(20).std()
 
-    average_volume = volume.rolling(20).mean()
+    avg_volume = volume.rolling(20).mean()
+
     df["Volume_Ratio"] = (
-        volume / average_volume.replace(0, np.nan)
+        volume / avg_volume.replace(0, np.nan)
     )
 
     candle_range = (high - low).replace(0, np.nan)
@@ -178,56 +340,61 @@ def add_indicators(df):
         (high - close) / candle_range
     ) * 100
 
-    df["VWAP"] = (
-        (close * volume).rolling(20).sum()
-        / volume.rolling(20).sum().replace(0, np.nan)
-    )
-
     df["BB_Middle"] = close.rolling(20).mean()
+
     bb_std = close.rolling(20).std()
 
     df["BB_Upper"] = df["BB_Middle"] + 2 * bb_std
     df["BB_Lower"] = df["BB_Middle"] - 2 * bb_std
 
-    return df
+    return df.replace([np.inf, -np.inf], np.nan)
 
 
-data = add_indicators(data)
-data = data.replace([np.inf, -np.inf], np.nan)
+data = calculate_indicators(data)
+
+if len(data) < 2:
+    st.error("বিশ্লেষণের জন্য পর্যাপ্ত candle নেই।")
+    st.stop()
 
 latest = data.iloc[-1]
-previous = data.iloc[-2] if len(data) > 1 else latest
+previous = data.iloc[-2]
 
 # ---------------- MARKET OVERVIEW ----------------
 
 st.subheader("📌 Market Overview")
 
-col1, col2, col3, col4 = st.columns(4)
+c1, c2, c3, c4 = st.columns(4)
 
-col1.metric(
+c1.metric(
     "Latest Price",
     f"{latest['close']:.2f}",
     f"{latest['close'] - previous['close']:.2f}"
 )
 
-col2.metric(
+c2.metric(
     "RSI",
-    f"{latest['RSI']:.2f}" if pd.notna(latest["RSI"]) else "N/A"
+    f"{latest['RSI']:.2f}"
+    if pd.notna(latest["RSI"]) else "N/A"
 )
 
-col3.metric(
+c3.metric(
     "ATR",
-    f"{latest['ATR']:.2f}" if pd.notna(latest["ATR"]) else "N/A"
+    f"{latest['ATR']:.2f}"
+    if pd.notna(latest["ATR"]) else "N/A"
 )
 
-col4.metric(
+c4.metric(
     "Volume",
     f"{latest['volume']:,.0f}"
 )
 
-# ---------------- CHART ----------------
+st.caption(
+    f"Last candle: {data.index[-1]}"
+)
 
-st.subheader("📈 XAUUSD Candlestick Chart")
+# ---------------- PRICE CHART ----------------
+
+st.subheader("📈 Candlestick Chart")
 
 fig = go.Figure()
 
@@ -242,92 +409,100 @@ fig.add_trace(
     )
 )
 
-fig.add_trace(
-    go.Scatter(
-        x=data.index,
-        y=data["EMA_20"],
-        name="EMA 20",
-        line=dict(width=1)
+for column, label in [
+    ("EMA_20", "EMA 20"),
+    ("EMA_50", "EMA 50"),
+    ("EMA_200", "EMA 200")
+]:
+    fig.add_trace(
+        go.Scatter(
+            x=data.index,
+            y=data[column],
+            name=label,
+            mode="lines"
+        )
     )
-)
-
-fig.add_trace(
-    go.Scatter(
-        x=data.index,
-        y=data["EMA_50"],
-        name="EMA 50",
-        line=dict(width=1)
-    )
-)
-
-fig.add_trace(
-    go.Scatter(
-        x=data.index,
-        y=data["EMA_200"],
-        name="EMA 200",
-        line=dict(width=1)
-    )
-)
 
 fig.update_layout(
+    template="plotly_dark",
     height=600,
     xaxis_rangeslider_visible=False,
-    template="plotly_dark",
-    margin=dict(l=10, r=10, t=30, b=10)
+    hovermode="x unified"
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(
+    fig,
+    use_container_width=True
+)
 
-# ---------------- MARKET STRUCTURE ----------------
+# ---------------- TREND OBSERVATION ----------------
 
-st.subheader("🧭 Market Structure")
+st.subheader("🧭 EMA Structure")
 
-if latest["EMA_20"] > latest["EMA_50"] > latest["EMA_200"]:
-    trend = "Bullish EMA Alignment"
-elif latest["EMA_20"] < latest["EMA_50"] < latest["EMA_200"]:
-    trend = "Bearish EMA Alignment"
+if (
+    pd.notna(latest["EMA_20"])
+    and pd.notna(latest["EMA_50"])
+    and pd.notna(latest["EMA_200"])
+):
+
+    if (
+        latest["EMA_20"] >
+        latest["EMA_50"] >
+        latest["EMA_200"]
+    ):
+        st.info("EMA alignment: Bullish structure")
+
+    elif (
+        latest["EMA_20"] <
+        latest["EMA_50"] <
+        latest["EMA_200"]
+    ):
+        st.info("EMA alignment: Bearish structure")
+
+    else:
+        st.info("EMA alignment: Mixed structure")
+
 else:
-    trend = "Mixed / Sideways Structure"
+    st.info("Not enough candles for full EMA analysis.")
 
-st.info(f"EMA Structure: {trend}")
+# ---------------- RSI AND MACD ----------------
 
-# ---------------- RSI & MACD ----------------
+left, right = st.columns(2)
 
-col1, col2 = st.columns(2)
+with left:
 
-with col1:
     st.subheader("RSI Analysis")
 
-    rsi_value = latest["RSI"]
+    if pd.isna(latest["RSI"]):
+        st.write("RSI unavailable.")
 
-    if pd.isna(rsi_value):
-        st.write("RSI data unavailable.")
-    elif rsi_value >= 70:
-        st.warning("RSI is in the higher range.")
-    elif rsi_value <= 30:
-        st.warning("RSI is in the lower range.")
     else:
-        st.info("RSI is in the middle range.")
+        st.metric("RSI Value", f"{latest['RSI']:.2f}")
 
-    st.metric(
-        "RSI Value",
-        f"{rsi_value:.2f}" if pd.notna(rsi_value) else "N/A"
-    )
+        if latest["RSI"] >= 70:
+            st.warning("RSI is in the upper range.")
 
-with col2:
+        elif latest["RSI"] <= 30:
+            st.warning("RSI is in the lower range.")
+
+        else:
+            st.info("RSI is in the middle range.")
+
+with right:
+
     st.subheader("MACD Analysis")
-
-    if latest["MACD"] > latest["MACD_Signal"]:
-        st.success("MACD is above Signal")
-    else:
-        st.warning("MACD is below Signal")
 
     st.metric("MACD", f"{latest['MACD']:.4f}")
     st.metric("Signal", f"{latest['MACD_Signal']:.4f}")
 
-# ---------------- SUPPORT & RESISTANCE ----------------
+    if latest["MACD"] > latest["MACD_Signal"]:
+        st.info("MACD is above its signal line.")
+    else:
+        st.info("MACD is below its signal line.")
 
-st.subheader("📍 Support & Resistance")
+# ---------------- SUPPORT AND RESISTANCE ----------------
+
+st.subheader("📍 Recent Price Range")
 
 lookback = min(50, len(data))
 recent = data.tail(lookback)
@@ -335,81 +510,68 @@ recent = data.tail(lookback)
 support = recent["low"].min()
 resistance = recent["high"].max()
 
-col1, col2 = st.columns(2)
+c1, c2 = st.columns(2)
 
-col1.metric("Recent Support", f"{support:.2f}")
-col2.metric("Recent Resistance", f"{resistance:.2f}")
+c1.metric("Recent Range Low", f"{support:.2f}")
+c2.metric("Recent Range High", f"{resistance:.2f}")
 
-# ---------------- ICT HEURISTICS ----------------
+st.caption(
+    "These are recent historical range levels, "
+    "not guaranteed support or resistance."
+)
 
-st.subheader("🧩 ICT-Style Market Observations")
+# ---------------- ICT-STYLE OBSERVATIONS ----------------
 
-def market_observations(df):
+st.subheader("🧩 ICT-Style Candle Observations")
 
-    observations = []
+observations = []
 
-    if len(df) < 5:
-        return ["Not enough candles for observations."]
+if len(data) >= 5:
 
-    current = df.iloc[-1]
-    prior = df.iloc[-2]
-    recent = df.iloc[-5:-1]
+    current = data.iloc[-1]
+    prior = data.iloc[-2]
+    reference = data.iloc[-5:-1]
 
-    if current["close"] > recent["high"].max():
-        observations.append("Recent high break detected.")
+    if current["close"] > reference["high"].max():
+        observations.append("Recent high breakout observation.")
 
-    if current["close"] < recent["low"].min():
-        observations.append("Recent low break detected.")
+    if current["close"] < reference["low"].min():
+        observations.append("Recent low breakdown observation.")
 
-    if current["high"] > recent["high"].max():
-        observations.append("Possible buy-side liquidity sweep.")
+    if (
+        current["high"] > reference["high"].max()
+        and current["close"] < reference["high"].max()
+    ):
+        observations.append("Possible upper liquidity sweep pattern.")
 
-    if current["low"] < recent["low"].min():
-        observations.append("Possible sell-side liquidity sweep.")
+    if (
+        current["low"] < reference["low"].min()
+        and current["close"] > reference["low"].min()
+    ):
+        observations.append("Possible lower liquidity sweep pattern.")
 
-    if current["low"] > df.iloc[-3]["high"]:
-        observations.append("Possible bullish Fair Value Gap.")
+    if current["low"] > data.iloc[-3]["high"]:
+        observations.append("Possible bullish FVG pattern.")
 
-    if current["high"] < df.iloc[-3]["low"]:
-        observations.append("Possible bearish Fair Value Gap.")
+    if current["high"] < data.iloc[-3]["low"]:
+        observations.append("Possible bearish FVG pattern.")
 
-    if current["close"] > current["open"]:
-        observations.append("Latest candle closed bullish.")
-    elif current["close"] < current["open"]:
-        observations.append("Latest candle closed bearish.")
+if not observations:
+    observations.append("No notable pattern detected in the selected candles.")
 
-    if not observations:
-        observations.append("No notable heuristic pattern detected.")
-
-    return observations
-
-
-for item in market_observations(data):
+for item in observations:
     st.write("•", item)
 
 st.caption(
-    "ICT-style observations are simplified candle-based heuristics, "
-    "not verified institutional activity."
+    "These are simplified candle-based observations. "
+    "They do not verify institutional orders or actual liquidity."
 )
 
 # ---------------- MULTI TIMEFRAME ----------------
 
 st.subheader("⏱️ Multi-Timeframe Overview")
 
-def resample_data(df, rule):
-
-    result = df.resample(rule).agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "volume": "sum"
-    })
-
-    return result.dropna()
-
-
-timeframes = {
+tf_rules = {
     "M5": "5min",
     "M15": "15min",
     "M30": "30min",
@@ -418,61 +580,70 @@ timeframes = {
     "D1": "1D"
 }
 
-tf_rows = []
+if data_source == "Uploaded CSV":
 
-for name, rule in timeframes.items():
+    tf_base = data.copy()
+
+else:
+
+    # Use available data to construct higher timeframes.
+    tf_base = data.copy()
+
+tf_results = []
+
+for tf_name, rule in tf_rules.items():
 
     try:
-        tf_data = resample_data(data, rule)
 
-        if len(tf_data) < 2:
+        if tf_name == timeframe:
+            tf_df = tf_base.copy()
+
+        elif tf_name == "H4" and timeframe in ["M5", "M15", "M30", "H1"]:
+            tf_df = resample_ohlc(tf_base, "4h")
+
+        elif tf_name == "D1" and timeframe != "D1":
+            tf_df = resample_ohlc(tf_base, "1D")
+
+        else:
             continue
 
-        tf_last = tf_data.iloc[-1]
-        tf_prev = tf_data.iloc[-2]
+        if len(tf_df) < 2:
+            continue
 
-        direction = (
-            "Bullish"
-            if tf_last["close"] > tf_prev["close"]
-            else "Bearish"
-        )
+        last = tf_df.iloc[-1]
+        prev = tf_df.iloc[-2]
 
-        tf_rows.append({
-            "Timeframe": name,
-            "Close": round(tf_last["close"], 2),
-            "Previous Close": round(tf_prev["close"], 2),
-            "Candle Direction": direction
+        tf_results.append({
+            "Timeframe": tf_name,
+            "Latest Close": round(last["close"], 2),
+            "Previous Close": round(prev["close"], 2),
+            "Candle Direction": (
+                "Up" if last["close"] > prev["close"] else "Down"
+            )
         })
 
     except Exception:
         continue
 
-if tf_rows:
+if tf_results:
+
     st.dataframe(
-        pd.DataFrame(tf_rows),
+        pd.DataFrame(tf_results),
         use_container_width=True,
         hide_index=True
     )
+
 else:
-    st.info("Not enough data for multi-timeframe analysis.")
+    st.info("Not enough data for additional timeframes.")
 
-# ---------------- AI MODEL ----------------
+st.caption(
+    "Multi-timeframe results are limited by the source data's interval "
+    "and available history."
+)
 
-st.subheader("🤖 Optional AI Model")
+# ---------------- OPTIONAL AI MODEL ----------------
 
-feature_names = [
-    "EMA_20",
-    "EMA_50",
-    "EMA_200",
-    "RSI",
-    "MACD",
-    "MACD_Signal",
-    "ATR",
-    "Volatility",
-    "Volume_Ratio",
-    "Estimated_Buy_Pressure",
-    "Estimated_Sell_Pressure"
-]
+st.subheader("🤖 Existing AI Model Status")
 
 model_paths = [
     "XAUUSD_HYBRID_PROJECT/XAUUSD_AI_Model.pkl",
@@ -480,93 +651,93 @@ model_paths = [
     "forex_ai_model.pkl"
 ]
 
-model = None
-model_path_used = None
+model_found = False
 
-for path in model_paths:
-    if os.path.exists(path):
+for model_path in model_paths:
+
+    if os.path.exists(model_path):
+
         try:
-            model = joblib.load(path)
-            model_path_used = path
+
+            loaded_model = joblib.load(model_path)
+            model_found = True
+
+            st.success(f"AI model file loaded: {model_path}")
+
+            st.info(
+                "Model পাওয়া গেছে। তবে মূল training data, "
+                "feature calculation এবং class labels যাচাই না করে "
+                "কোনো prediction দেখানো হচ্ছে না।"
+            )
+
             break
-        except Exception as error:
-            st.warning(f"Could not load model: {error}")
 
-if model is not None:
+        except Exception as exc:
 
-    st.caption(f"Loaded model: {model_path_used}")
-
-    try:
-        model_input = data[feature_names].iloc[[-1]]
-
-        if model_input.isna().any().any():
             st.warning(
-                "AI prediction unavailable: indicator values are incomplete."
-            )
-        else:
-            prediction = model.predict(model_input)[0]
-
-            st.write("Model output:", prediction)
-
-            if hasattr(model, "predict_proba"):
-                scores = model.predict_proba(model_input)[0]
-
-                score_df = pd.DataFrame({
-                    "Class": model.classes_,
-                    "Model Score": scores
-                })
-
-                st.dataframe(
-                    score_df,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-            st.caption(
-                "Model scores are not win probabilities or guarantees. "
-                "Prediction labels depend on the model's original training labels."
+                f"Model file exists but could not be loaded: "
+                f"{str(exc)[:250]}"
             )
 
-    except Exception as error:
-        st.warning(f"Model prediction unavailable: {error}")
+if not model_found:
 
-else:
     st.info(
-        "No compatible AI model found. Dashboard indicators "
-        "and market observations are still available."
+        "Compatible AI model file পাওয়া যায়নি। "
+        "বাকি dashboard features চালু আছে।"
     )
 
 # ---------------- NEWS ----------------
 
 st.subheader("📰 Gold Market News")
 
-@st.cache_data(ttl=900)
-def get_news():
+@st.cache_data(ttl=900, show_spinner=False)
+def load_news():
 
-    feed_url = (
+    url = (
         "https://news.google.com/rss/search?"
-        "q=gold+XAUUSD+market&hl=en-US&gl=US&ceid=US:en"
+        "q=gold+market+XAUUSD&hl=en-US&gl=US&ceid=US:en"
     )
 
-    feed = feedparser.parse(feed_url)
-    return feed.entries[:10]
+    feed = feedparser.parse(url)
+
+    return [
+        {
+            "title": item.get("title", "Untitled"),
+            "link": item.get("link", ""),
+            "published": item.get("published", "")
+        }
+        for item in feed.entries[:10]
+    ]
 
 
 try:
-    news_items = get_news()
 
-    if news_items:
-        for item in news_items:
-            st.markdown(f"**[{item.title}]({item.link})**")
-            if hasattr(item, "published"):
-                st.caption(item.published)
+    news = load_news()
+
+    if news:
+
+        for item in news:
+
+            if item["link"]:
+                st.markdown(
+                    f"[{item['title']}]({item['link']})"
+                )
+            else:
+                st.write(item["title"])
+
+            if item["published"]:
+                st.caption(item["published"])
+
     else:
-        st.info("No news items available.")
+        st.info("News feed returned no articles.")
 
-except Exception:
-    st.info("News feed is currently unavailable.")
+except Exception as exc:
 
-# ---------------- DATA TABLE ----------------
+    st.warning(
+        f"News feed unavailable: {str(exc)[:200]}"
+    )
+
+# ---------------- INDICATOR TABLE ----------------
 
 st.subheader("📋 Latest Indicator Data")
 
@@ -583,45 +754,66 @@ display_columns = [
     "MACD",
     "MACD_Signal",
     "ATR",
-    "Volume_Ratio"
+    "Volatility",
+    "Volume_Ratio",
+    "Estimated_Buy_Pressure",
+    "Estimated_Sell_Pressure"
 ]
 
 available_columns = [
-    col for col in display_columns if col in data.columns
+    col for col in display_columns
+    if col in data.columns
 ]
 
 st.dataframe(
-    data[available_columns].tail(20).round(4),
+    data[available_columns].tail(30).round(4),
     use_container_width=True
 )
 
-# ---------------- DOWNLOAD CSV ----------------
+# ---------------- CSV EXPORT ----------------
 
-st.subheader("📥 Export Historical Analysis")
+st.subheader("📥 Export Analysis Data")
 
-csv_data = data.to_csv().encode("utf-8")
+csv_bytes = data.to_csv().encode("utf-8")
 
 st.download_button(
     label="Download Analysis CSV",
-    data=csv_data,
+    data=csv_bytes,
     file_name="XAUUSD_Analysis.csv",
     mime="text/csv"
 )
+
+# ---------------- DIAGNOSTICS ----------------
+
+with st.expander("🔧 Data Diagnostics"):
+
+    st.write("Data source:", data_source)
+    st.write("Selected timeframe:", timeframe)
+    st.write("Rows loaded:", len(data))
+    st.write("First candle:", str(data.index[0]))
+    st.write("Last candle:", str(data.index[-1]))
+    st.write("Missing values:")
+
+    st.dataframe(
+        data.isna().sum().rename("Missing Count").to_frame(),
+        use_container_width=True
+    )
 
 # ---------------- FOOTER ----------------
 
 st.divider()
 
 st.caption(
-    "XAUUSD AI HYBRID PRO | Educational market research dashboard"
+    "XAUUSD AI HYBRID PRO | Educational research dashboard"
 )
 
 st.warning(
-    "এই অ্যাপ কোনো আর্থিক পরামর্শ দেয় না, "
-    "কোনো ট্রেডিং নির্দেশনা দেয় না এবং কোনো বাস্তব ট্রেড সম্পাদন করে না। "
-    "ডেটা ও বিশ্লেষণে ভুল বা বিলম্ব থাকতে পারে।"
+    "এই অ্যাপ শিক্ষামূলক তথ্য ও ঐতিহাসিক বাজার বিশ্লেষণের জন্য। "
+    "এটি আর্থিক পরামর্শ, ভবিষ্যৎ ফলাফলের নিশ্চয়তা বা "
+    "বাস্তব ট্রেডিং নির্দেশনা দেয় না।"
 )
 
 st.caption(
-    f"Last dashboard update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    "Dashboard updated: "
+    + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 )
