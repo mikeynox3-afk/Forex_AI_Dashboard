@@ -708,7 +708,9 @@ else:
     c.write(
         f"Premium / Discount: "
         f"{ict.get('Premium/Discount', 'N/A')}"
-    )    a, b, c = st.columns(3)
+    )    
+     
+    a, b, c = st.columns(3)
 
     a.write(f"Bullish FVG: {ict.get('Bullish FVG', False)}")
     b.write(f"Bearish FVG: {ict.get('Bearish FVG', False)}")
