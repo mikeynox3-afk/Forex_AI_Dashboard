@@ -668,32 +668,64 @@ st.caption(
 # ICT ANALYSIS
 # --------------------------------------------------
 
+
 st.subheader("ICT / Smart Money Research")
 
-selected_tf = st.selectbox(
-    "ICT timeframe",
-    list(mtf_frames.keys()),
-    index=0
+if not mtf_frames:
+    st.warning("ICT analysis-এর জন্য timeframe data পাওয়া যায়নি।")
+else:
+    selected_tf = st.selectbox(
+        "ICT timeframe",
+        list(mtf_frames.keys()),
+        index=0,
+        key="ict_timeframe"
+    )
+
+    ict = ict_analysis(mtf_frames[selected_tf])
+
+    a, b, c = st.columns(3)
+
+    a.write(
+        f"Bullish Liquidity Sweep: "
+        f"{ict.get('Bullish Sweep', False)}"
+    )
+
+    b.write(
+        f"Bearish Liquidity Sweep: "
+        f"{ict.get('Bearish Sweep', False)}"
+    )
+
+    c.write(
+        f"Market Structure: "
+        f"{ict.get('Market Structure', 'N/A')}"
+    )
+
+    a, b, c = st.columns(3)
+
+    a.write(f"Bullish BOS: {ict.get('Bullish BOS', False)}")
+    b.write(f"Bearish BOS: {ict.get('Bearish BOS', False)}")
+
+    c.write(
+        f"Premium / Discount: "
+        f"{ict.get('Premium/Discount', 'N/A')}"
+    )
+
+    a, b, c = st.columns(3)
+
+    a.write(f"Bullish FVG: {ict.get('Bullish FVG', False)}")
+    b.write(f"Bearish FVG: {ict.get('Bearish FVG', False)}")
+
+    c.write(
+        f"Equal High / Low: "
+        f"{ict.get('Equal High', False)} / "
+        f"{ict.get('Equal Low', False)}"
+    )
+
+st.caption(
+    "ICT labels are simplified candle-based heuristics, "
+    "not verified institutional order-flow data."
 )
 
-ict = ict_analysis(mtf_frames[selected_tf])
-
-a, b, c = st.columns(3)
-
-a.write(
-    "Bullish Liquidity Sweep:",
-    ict.get("Bullish Sweep", False)
-)
-
-b.write(
-    "Bearish Liquidity Sweep:",
-    ict.get("Bearish Sweep", False)
-)
-
-c.write(
-    "Market Structure:",
-    ict.get("Market Structure", "N/A")
-)
 
 a, b, c = st.columns(3)
 
